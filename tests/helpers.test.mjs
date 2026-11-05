@@ -10,6 +10,7 @@ import {
   isLimitError,
   nextFallback,
   buildChain,
+  sanitizeBaseline,
   DEFAULT_FALLBACK,
 } from "../src/helpers.ts";
 
@@ -104,4 +105,45 @@ test("buildChain: missing providerID/id get defaults", () => {
   assert.deepEqual(buildChain({ model: { providerID: "acme" } }), [
     { providerID: "acme", id: "crouton-alpha-free" },
   ]);
+});
+
+test("sanitizeBaseline: keeps valid entries, drops invalid", () => {
+  assert.deepEqual(
+    sanitizeBaseline([
+      { providerID: "opencode", id: "a" },
+      { providerID: "", id: "b" },
+      { id: "c" },
+      { providerID: "opencode", id: 42 },
+      null,
+    ]),
+    [{ providerID: "opencode", id: "a" }]
+  );
+  assert.deepEqual(sanitizeBaseline(null), []);
+  assert.deepEqual(sanitizeBaseline({}), []);
+});
+
+test("buildChain: committed baseline used when no options", () => {
+  const baseline = [
+    { providerID: "opencode", id: "free-a", name: "Free A" },
+    { providerID: "opencode", id: "free-b" },
+    { id: "invalid" },
+  ];
+  assert.deepEqual(buildChain(undefined, baseline), [
+    { providerID: "opencode", id: "free-a" },
+    { providerID: "opencode", id: "free-b" },
+  ]);
+});
+
+test("buildChain: empty or invalid baseline falls back to default", () => {
+  assert.deepEqual(buildChain(undefined, []), [DEFAULT_FALLBACK]);
+  assert.deepEqual(buildChain(undefined, [{ id: "invalid" }]), [DEFAULT_FALLBACK]);
+});
+
+test("buildChain: options take precedence over baseline", () => {
+  assert.deepEqual(
+    buildChain({ fallbacks: [{ providerID: "acme", id: "x" }] }, [
+      { providerID: "opencode", id: "free" },
+    ]),
+    [{ providerID: "acme", id: "x" }]
+  );
 });

@@ -11,6 +11,8 @@ export type SwitchbladeOptions = {
   fallbacks?: SwitchbladeModel[];
 };
 
+
+
 export const DEFAULT_FALLBACK: SwitchbladeModel = {
   providerID: "opencode",
   id: "crouton-alpha-free",
@@ -62,8 +64,7 @@ export function nextFallback(
 export function toModel(value: unknown): SwitchbladeModel | null {
   if (value == null || typeof value !== "object") return null;
   const v = value as { providerID?: unknown; id?: unknown; provider?: unknown };
-  const id =
-    typeof v.id === "string" && v.id.length > 0 ? v.id : DEFAULT_FALLBACK.id;
+  const id = typeof v.id === "string" && v.id.length > 0 ? v.id : DEFAULT_FALLBACK.id;
   const providerID =
     typeof v.providerID === "string" && v.providerID.length > 0
       ? v.providerID
@@ -73,20 +74,43 @@ export function toModel(value: unknown): SwitchbladeModel | null {
   return { providerID, id };
 }
 
-/** Build the fallback chain from ctx.options, with defaults. */
-export function buildChain(options: unknown): SwitchbladeModel[] {
-  if (options == null || typeof options !== "object") {
-    return [{ ...DEFAULT_FALLBACK }];
-  }
-  const opts = options as SwitchbladeOptions;
+/** Strictly validate a model entry; never fills in defaults. */
+export function toStrictModel(value: unknown): SwitchbladeModel | null {
+  if (value == null || typeof value !== "object") return null;
+  const v = value as { providerID?: unknown; id?: unknown };
+  if (typeof v.providerID !== "string" || v.providerID.length === 0) return null;
+  if (typeof v.id !== "string" || v.id.length === 0) return null;
+  return { providerID: v.providerID, id: v.id };
+}
 
-  if (Array.isArray(opts.fallbacks) && opts.fallbacks.length > 0) {
-    const chain = opts.fallbacks
-      .map(toModel)
-      .filter((m): m is SwitchbladeModel => m != null);
-    if (chain.length > 0) return chain;
+/** Validate a baseline array (e.g. from free-fallbacks.json). */
+export function sanitizeBaseline(value: unknown): SwitchbladeModel[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(toStrictModel)
+    .filter((model): model is SwitchbladeModel => model !== null);
+}
+
+/** Build the fallback chain from options, then the committed baseline, then the default. */
+export function buildChain(options: unknown, baseline?: unknown): SwitchbladeModel[] {
+  if (options != null && typeof options === "object") {
+    const opts = options as SwitchbladeOptions;
+
+    if (Array.isArray(opts.fallbacks) && opts.fallbacks.length > 0) {
+      const chain = opts.fallbacks
+        .map(toModel)
+        .filter((m): m is SwitchbladeModel => m != null);
+      if (chain.length > 0) return chain;
+    }
+
+    if (opts.model != null) {
+      const single = toModel(opts.model);
+      if (single) return [{ ...single }];
+    }
   }
 
-  const single = toModel(opts.model);
-  return [{ ...(single ?? DEFAULT_FALLBACK) }];
+  const committed = sanitizeBaseline(baseline);
+  if (committed.length > 0) return committed;
+
+  return [{ ...DEFAULT_FALLBACK }];
 }

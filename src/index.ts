@@ -1,28 +1,87 @@
 // Switchblade — OpenCode server plugin for weekly-limit fallback.
 //
-// When a provider returns a rate/weekly/quota error (429, 402, or a matching
-// message), Switchblade calls ctx.session.switchModel() to move the session
-// to the next model in its fallback chain and sets decision.retry so the
-// request retries immediately. On subsequent turns it appends a short system
-// note via the context hook so the agent knows it switched.
+// On a rate/weekly/quota limit (429, 402, or a matching message), Switchblade
+// calls ctx.session.switchModel() to move the session to the next model in the
+// fallback ladder and sets decision.retry so the request retries immediately.
 //
-// Config (from ctx.options — object form of `plugins` in opencode.jsonc):
-//   model:     { providerID?, id? }  — single fallback (default opencode/crouton-alpha-free)
-//   fallbacks: [ { providerID?, id? }, ... ] — chained fallbacks (takes precedence)
-// Any entry with providerID omitted defaults to "opencode"; id defaults to
-// "crouton-alpha-free". Unknown shapes are ignored (defensive parsing).
+// Default ladder: src/free-fallbacks.json, generated from the local model
+// catalog with `npm run update:models` and validated at load time. A session
+// only walks the committed free models, minus any now disabled/unavailable.
+//
+// Configuration (object form of `plugins` in opencode.jsonc):
+//   model:     { providerID?, id? }  — single fallback override
+//   fallbacks: [ { providerID?, id? }, ... ] — chained fallback override
+// Explicit options take precedence over the committed baseline.
 
+import { readFileSync } from "node:fs";
 import { Plugin } from "@opencode/plugin";
 import {
   isLimitError,
   nextFallback,
   buildChain,
+  sanitizeBaseline,
   type SwitchbladeModel,
 } from "./helpers.ts";
 
 const STORAGE_KEY = "sessions";
 
 type SwitchMap = Map<string, number>;
+
+/** Read the committed free-model baseline; returns [] when unavailable/invalid. */
+function loadBaseline(): SwitchbladeModel[] {
+  try {
+    const raw = readFileSync(
+      new URL("./free-fallbacks.json", import.meta.url),
+      "utf8"
+    );
+    const parsed = JSON.parse(raw) as { fallbacks?: unknown };
+    return sanitizeBaseline(parsed?.fallbacks);
+  } catch (err) {
+    console.warn(
+      `[switchblade] free-fallbacks.json unavailable/invalid: ${
+        (err as Error)?.message ?? err
+      }`
+    );
+    return [];
+  }
+}
+
+const modelKey = (model: SwitchbladeModel): string =>
+  `${model.providerID}/${model.id}`;
+
+function isZeroCost(tier: any): boolean {
+  const zero = (number: unknown): boolean =>
+    number == null || (typeof number === "number" && number === 0);
+  return (
+    zero(tier?.input) &&
+    zero(tier?.output) &&
+    zero(tier?.cache?.read) &&
+    zero(tier?.cache?.write)
+  );
+}
+
+/** Return the set of currently selectable zero-cost chat models, or null if the catalog can't be read. */
+async function availableModelKeys(ctx: any): Promise<Set<string> | null> {
+  try {
+    const models = await ctx.model?.list?.();
+    if (!Array.isArray(models)) return null;
+
+    const keys = new Set<string>();
+    for (const model of models) {
+      if (!model || typeof model.providerID !== "string" || typeof model.id !== "string") continue;
+      if (model.enabled === false) continue;
+      if (typeof model.status === "string" && model.status !== "active") continue;
+      if (typeof model.type === "string" && model.type !== "chat") continue;
+      if (model.capabilities && model.capabilities.tools !== true) continue;
+      if (Array.isArray(model.cost) && model.cost.length > 0 && !model.cost.every(isZeroCost)) continue;
+      keys.add(`${model.providerID}/${model.id}`);
+    }
+    return keys;
+  } catch {
+    // Catalog unavailable: keep the committed baseline as-is.
+    return null;
+  }
+}
 
 async function loadPersisted(ctx: any): Promise<SwitchMap> {
   const map: SwitchMap = new Map();
@@ -55,7 +114,21 @@ export default Plugin.define({
   id: "switchblade",
 
   async setup(ctx) {
-    const chain: SwitchbladeModel[] = buildChain((ctx as any).options);
+    const committed = loadBaseline();
+    const available = await availableModelKeys(ctx);
+    const baseline = available
+      ? committed.filter((model) => available.has(modelKey(model)))
+      : committed;
+
+    if (available) {
+      console.log(
+        `[switchblade] committed baseline: ${committed.length}; available now: ${baseline.length}`
+      );
+    } else {
+      console.warn("[switchblade] model list unavailable; using committed baseline unvalidated");
+    }
+
+    const chain: SwitchbladeModel[] = buildChain((ctx as any).options, baseline);
 
     // Per-session switched index: -1 = never switched, >= 0 = index into chain.
     const switched: SwitchMap = await loadPersisted(ctx);

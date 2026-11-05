@@ -1,0 +1,109 @@
+{
+  "generatedAt": "2026-11-05T15:24:44.835Z",
+  "source": "opencode api get /api/model",
+  "filter": {
+    "type": "chat",
+    "enabled": true,
+    "status": "active",
+    "tools": true,
+    "zeroCost": true
+  },
+  "fallbacks": [
+    {
+      "providerID": "opencode",
+      "id": "crouton-alpha-free",
+      "name": "Crouton Alpha Free",
+      "releaseDate": "2026-11-03",
+      "context": 1048576,
+      "output": 270000
+    },
+    {
+      "providerID": "opencode",
+      "id": "pulse-alpha-free",
+      "name": "Pulse Alpha Free",
+      "releaseDate": "2026-11-02",
+      "context": 1048576,
+      "output": 131072
+    },
+    {
+      "providerID": "opencode-go",
+      "id": "iceman-contributor-free",
+      "name": "Iceman Contributor Free",
+      "releaseDate": "2026-10-24",
+      "context": 262144,
+      "output": 131072
+    },
+    {
+      "providerID": "opencode",
+      "id": "flint-40b-free",
+      "name": "Flint 40B Free",
+      "releaseDate": "2026-10-21",
+      "context": 262144,
+      "output": 65536
+    },
+    {
+      "providerID": "opencode",
+      "id": "nemotron-3.5-super-vl-free",
+      "name": "Nemotron 3.5 Super VL Free",
+      "releaseDate": "2026-10-15",
+      "context": 1048576,
+      "output": 131072
+    },
+    {
+      "providerID": "opencode-go",
+      "id": "beam-free",
+      "name": "Beam Free",
+      "releaseDate": "2026-10-05",
+      "context": 1048576,
+      "output": 131072
+    },
+    {
+      "providerID": "opencode",
+      "id": "beam-free",
+      "name": "Beam Free",
+      "releaseDate": "2026-10-05",
+      "context": 1048576,
+      "output": 131072
+    },
+    {
+      "providerID": "opencode",
+      "id": "mimo-v2.6-flash-free",
+      "name": "MiMo-V2.6-Flash Free",
+      "releaseDate": "2026-09-22",
+      "context": 200000,
+      "output": 32000
+    },
+    {
+      "providerID": "opencode",
+      "id": "deepseek-v4.1-flash-free",
+      "name": "DeepSeek V4.1 Flash Free",
+      "releaseDate": "2026-09-10",
+      "context": 200000,
+      "output": 32000
+    },
+    {
+      "providerID": "opencode",
+      "id": "glm-5.3-flash-free",
+      "name": "GLM-5.3-Flash Free",
+      "releaseDate": "2026-08-26",
+      "context": 200000,
+      "output": 32000
+    },
+    {
+      "providerID": "opencode",
+      "id": "nemotron-3.5-lightning-free",
+      "name": "Nemotron 3.5 Lightning Free",
+      "releaseDate": "2026-08-11",
+      "context": 262144,
+      "output": 262144
+    },
+    {
+      "providerID": "opencode",
+      "id": "big-pickle",
+      "name": "Big Pickle",
+      "releaseDate": "2025-10-17",
+      "context": 200000,
+      "output": 32000
+    }
+  ]
+}

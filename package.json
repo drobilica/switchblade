@@ -1,6 +1,6 @@
 {
   "name": "opencode-plugin-switchblade",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "OpenCode server plugin: auto-switch to a free fallback model when a provider hits a rate/weekly/quota limit (429/402), then retry immediately.",
   "exports": {
@@ -12,7 +12,8 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --test tests/helpers.test.mjs",
+    "test": "node --test tests/helpers.test.mjs tests/baseline.test.mjs",
+    "update:models": "node scripts/update-free-fallbacks.mjs",
     "prepublishOnly": "npm run typecheck && npm test"
   },
   "dependencies": {
