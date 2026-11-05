@@ -1,0 +1,32 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  // Switchblade: auto-switch to a free fallback when a provider hits a
+  // rate / weekly / quota limit (429 / 402), then retry immediately.
+  //
+  // Single-fallback form (or omit `options` entirely — defaults to
+  // opencode/crouton-alpha-free):
+  // "plugins": [
+  //   {
+  //     "package": "opencode-plugin-switchblade",
+  //     "options": { "model": { "providerID": "opencode", "id": "crouton-alpha-free" } }
+  //   }
+  // ]
+  //
+  // Chained form (takes precedence over `model`): shown below.
+  "plugins": [
+    {
+      "package": "opencode-plugin-switchblade",
+      "options": {
+        "fallbacks": [
+          { "providerID": "opencode", "id": "crouton-alpha-free" },
+          { "providerID": "opencode", "id": "pulse-alpha-free" }
+        ]
+      }
+    }
+  ]
+
+  // Optional: make the fallback the session default too, so new sessions
+  // start on the free model instead of switching mid-run.
+  // "model": "opencode/crouton-alpha-free"
+}
