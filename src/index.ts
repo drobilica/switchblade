@@ -106,6 +106,72 @@ async function availableModelKeys(ctx: any): Promise<Set<string> | null> {
   }
 }
 
+/** Return the set of currently selectable models (any cost), or null if the catalog can't be read. */
+async function selectableModelKeys(ctx: any): Promise<Set<string> | null> {
+  try {
+    const models = await ctx.model?.list?.();
+    if (!Array.isArray(models)) return null;
+
+    const keys = new Set<string>();
+    for (const model of models) {
+      if (!model || typeof model.providerID !== "string" || typeof model.id !== "string") continue;
+      if (model.enabled === false) continue;
+      if (typeof model.status === "string" && model.status !== "active") continue;
+      keys.add(`${model.providerID}/${model.id}`);
+    }
+    return keys;
+  } catch {
+    return null;
+  }
+}
+
+/** Warn when configured agents reference models no longer in the project catalog. */
+async function warnUnavailableConfiguredAgents(ctx: any): Promise<void> {
+  const catalog = await selectableModelKeys(ctx);
+  if (!catalog) {
+    console.warn("[switchblade] unable to audit configured models: model list unavailable");
+    return;
+  }
+
+  const keyFromRef = (model: any): string | null =>
+    model && typeof model.providerID === "string" && typeof model.id === "string"
+      ? `${model.providerID}/${model.id}`
+      : null;
+
+  try {
+    const selected = await ctx.model?.default?.();
+    const rootModel = (selected as any)?.model ?? selected;
+    const rootKey = keyFromRef(rootModel);
+    if (rootKey && !catalog.has(rootKey)) {
+      console.warn(
+        `[switchblade] UNAVAILABLE MODEL configured as root default: ${rootKey} (not selectable in this project/account/region)`
+      );
+    }
+  } catch {
+    // Root default audit is best-effort.
+  }
+
+  try {
+    const agents = await ctx.agent?.list?.();
+    if (!Array.isArray(agents)) return;
+
+    for (const agent of agents) {
+      const model = (agent as any)?.model;
+      if (!model || typeof model.providerID !== "string" || typeof model.id !== "string") continue;
+      const key = `${model.providerID}/${model.id}`;
+      if (!catalog.has(key)) {
+        console.warn(
+          `[switchblade] UNAVAILABLE MODEL configured for agent ${(agent as any).id ?? "<unknown>"}: ${key} (not selectable in this project/account/region)`
+        );
+      }
+    }
+  } catch (err) {
+    console.warn(
+      `[switchblade] unable to audit configured agent models: ${(err as Error)?.message ?? err}`
+    );
+  }
+}
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value != null && typeof value === "object" && !Array.isArray(value);
 
@@ -175,6 +241,8 @@ export default Plugin.define({
     } else {
       console.warn("[switchblade] model list unavailable; using committed baseline unvalidated");
     }
+
+    await warnUnavailableConfiguredAgents(ctx);
 
     const disabled = !explicitChain && available !== null && baseline.length === 0;
     if (disabled) {

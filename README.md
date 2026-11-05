@@ -29,6 +29,9 @@ and retries immediately.
    `Continue from where you stopped.` instruction so the work can resume.
    Automatic plugin switches do **not** trigger this synthetic resume.
 7. On later turns, a short system note is added via the `context` hook.
+8. On startup, audits the configured default/agent models and logs a clear
+   `UNAVAILABLE MODEL` warning for any model the current project/account/region
+   cannot select.
 
 The default ladder is committed at `src/free-fallbacks.json`. At plugin startup
 Switchblade:
@@ -108,6 +111,21 @@ Object form with a custom chain or timeout threshold:
 - Entries missing both `providerID` and `id` are ignored.
 
 See `examples/opencode.jsonc`.
+
+## Unavailable configured models
+
+Switchblade does not silently rewrite your agent configuration. At startup it
+logs a warning for the configured root/default and each agent whose model is
+not in the current selectable catalog, for example:
+
+```text
+[switchblade] UNAVAILABLE MODEL configured for agent plan-free: opencode/nemotron-3-ultra-free (not selectable in this project/account/region)
+```
+
+It does this because "unavailable" can mean disabled, missing credentials,
+region-gated, out of plan quota, or removed from the catalog. Changing your
+model config is a user choice; Switchblade only warns and handles runtime
+failures.
 
 ## Updating the free-model ladder
 
