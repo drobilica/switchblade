@@ -9,7 +9,10 @@ import assert from "node:assert/strict";
 import {
   isLimitError,
   nextFallback,
+  nextAvailableFallback,
   buildChain,
+  fallbackErrorKind,
+  timeoutSwitchAfterAttempt,
   sanitizeBaseline,
   DEFAULT_FALLBACK,
 } from "../src/helpers.ts";
@@ -145,5 +148,73 @@ test("buildChain: options take precedence over baseline", () => {
       { providerID: "opencode", id: "free" },
     ]),
     [{ providerID: "acme", id: "x" }]
+  );
+});
+
+test("fallbackErrorKind: quota limits", () => {
+  assert.equal(fallbackErrorKind({ error: { status: 429 } }), "limit");
+  assert.equal(fallbackErrorKind({ error: { status: 402 } }), "limit");
+  assert.equal(
+    fallbackErrorKind({ error: { message: "weekly quota exceeded" } }),
+    "limit"
+  );
+});
+
+test("fallbackErrorKind: capacity and unavailable", () => {
+  assert.equal(fallbackErrorKind({ error: { status: 503 } }), "capacity");
+  assert.equal(fallbackErrorKind({ error: { status: 529 } }), "capacity");
+  assert.equal(
+    fallbackErrorKind({ error: { message: "Model overloaded, try later" } }),
+    "capacity"
+  );
+  assert.equal(
+    fallbackErrorKind({ error: { message: "Model unavailable: opencode/x" } }),
+    "unavailable"
+  );
+  assert.equal(
+    fallbackErrorKind({ error: { message: "unsupported region" } }),
+    "unavailable"
+  );
+});
+
+test("fallbackErrorKind: timeouts only after configured attempt", () => {
+  const timeout = { error: { status: 504 }, attempt: 1 };
+  assert.equal(fallbackErrorKind(timeout, 2), null);
+  assert.equal(fallbackErrorKind({ ...timeout, attempt: 2 }, 2), "timeout");
+  assert.equal(
+    fallbackErrorKind(
+      { error: { message: "request timed out" }, attempt: 3 },
+      2
+    ),
+    "timeout"
+  );
+});
+
+test("timeoutSwitchAfterAttempt: validates option", () => {
+  assert.equal(timeoutSwitchAfterAttempt(undefined), 2);
+  assert.equal(timeoutSwitchAfterAttempt({ timeoutSwitchAfterAttempt: 3 }), 3);
+  assert.equal(timeoutSwitchAfterAttempt({ timeoutSwitchAfterAttempt: "4" }), 4);
+  assert.equal(timeoutSwitchAfterAttempt({ timeoutSwitchAfterAttempt: 0 }), 2);
+  assert.equal(timeoutSwitchAfterAttempt({ timeoutSwitchAfterAttempt: NaN }), 2);
+});
+
+test("nextAvailableFallback: skips excluded candidates", () => {
+  const chain = [
+    { providerID: "opencode", id: "a" },
+    { providerID: "opencode", id: "b" },
+    { providerID: "opencode", id: "c" },
+  ];
+  const excluded = new Set(["opencode/b"]);
+  assert.deepEqual(nextAvailableFallback(chain, undefined, -1, excluded), {
+    model: chain[0],
+    index: 0,
+  });
+  assert.deepEqual(nextAvailableFallback(chain, undefined, 0, excluded), {
+    model: chain[2],
+    index: 2,
+  });
+  assert.equal(
+    nextAvailableFallback(chain, chain[2], 2, new Set(["opencode/a"])),
+    null
   );
 });

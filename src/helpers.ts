@@ -9,6 +9,8 @@ export type SwitchbladeModel = {
 export type SwitchbladeOptions = {
   model?: SwitchbladeModel;
   fallbacks?: SwitchbladeModel[];
+  /** Switch to the next fallback after this many physical attempts on a timeout. Defaults to 2. */
+  timeoutSwitchAfterAttempt?: number;
 };
 
 
@@ -20,20 +22,96 @@ export const DEFAULT_FALLBACK: SwitchbladeModel = {
 
 // Substrings that suggest a provider rate/weekly/quota/billing limit.
 export const LIMIT_MESSAGE_PATTERN =
-  /quota|weekly|rate limit|limit exceeded|insufficient|billing|over capacity/i;
+  /quota|weekly|rate limit|limit exceeded|insufficient|billing|over capacity|resource exhausted|too many requests/i;
 
-/** Return true if the retry event looks like a rate / weekly / quota limit. */
-export function isLimitError(event: {
+// Substrings that suggest the service is at capacity.
+export const CAPACITY_MESSAGE_PATTERN =
+  /capacity|overloaded|overload|oversubscribed|high demand|busy|temporarily unavailable|service unavailable|try again later/i;
+
+// Substrings that suggest the model itself is unavailable/disabled/not offered.
+export const UNAVAILABLE_MESSAGE_PATTERN =
+  /model unavailable|model not available|no model available|model.*disabled|disabled.*model|model.*hidden|unsupported region|not available in|not offered in|unavailable in/i;
+
+// Substrings that suggest a timeout or reset connection.
+export const TIMEOUT_MESSAGE_PATTERN =
+  /timeout|timed out|timedout|deadline exceeded|connection reset|socket hang up|econnreset|gateway timeout/i;
+
+type ErrorLike = {
   error?: { status?: number; type?: string; message?: string } | null;
   message?: string;
-}): boolean {
+  attempt?: number;
+};
+
+const errorParts = (event: ErrorLike): string[] =>
+  [event.error?.message, event.error?.type, event.message].filter(
+    (part): part is string => typeof part === "string"
+  );
+
+/** Return true if the retry event looks like a rate / weekly / quota limit. */
+export function isLimitError(event: ErrorLike): boolean {
   const status = event.error?.status;
   if (status === 429 || status === 402) return true;
+  return errorParts(event).some((part) => LIMIT_MESSAGE_PATTERN.test(part));
+}
 
-  const parts = [event.error?.message, event.error?.type, event.message];
-  return parts.some(
-    (part) => typeof part === "string" && LIMIT_MESSAGE_PATTERN.test(part)
-  );
+/** Return true if the retry event looks like a capacity/overload failure. */
+export function isCapacityError(event: ErrorLike): boolean {
+  const status = event.error?.status;
+  if (status === 503 || status === 529) return true;
+  return errorParts(event).some((part) => CAPACITY_MESSAGE_PATTERN.test(part));
+}
+
+/** Return true if the retry event looks like the model is unavailable/disabled. */
+export function isUnavailableError(event: ErrorLike): boolean {
+  const status = event.error?.status;
+  if (status === 404 && /model/i.test([
+    event.error?.message,
+    event.error?.type,
+    event.message,
+  ].filter((part): part is string => typeof part === 'string').join(' '))) {
+    return true;
+  }
+  return errorParts(event).some((part) => UNAVAILABLE_MESSAGE_PATTERN.test(part));
+}
+
+/** Return true if the retry event looks like a timeout/reset failure. */
+export function isTimeoutError(event: ErrorLike): boolean {
+  const status = event.error?.status;
+  if (status === 408 || status === 504) return true;
+  return errorParts(event).some((part) => TIMEOUT_MESSAGE_PATTERN.test(part));
+}
+
+export type FallbackErrorKind =
+  | "limit"
+  | "capacity"
+  | "unavailable"
+  | "timeout";
+
+/**
+ * Classify the retry event. Returning a kind means it is worth trying another
+ * model; timeouts only qualify after the configured attempt.
+ */
+export function fallbackErrorKind(
+  event: ErrorLike,
+  timeoutSwitchAfterAttempt = 2
+): FallbackErrorKind | null {
+  if (isLimitError(event)) return "limit";
+  if (isUnavailableError(event)) return "unavailable";
+  if (isCapacityError(event)) return "capacity";
+  if (isTimeoutError(event)) {
+    const attempt = Number.isFinite(event.attempt) ? Number(event.attempt) : 1;
+    return attempt >= timeoutSwitchAfterAttempt ? "timeout" : null;
+  }
+  return null;
+}
+
+/** Return true when a switchModel() failure is likely to be resolved by another candidate. */
+export function isUnavailableSwitchFailure(error: unknown): boolean {
+  const message =
+    error && typeof error === "object"
+      ? String((error as { message?: unknown }).message ?? error)
+      : String(error ?? "");
+  return fallbackErrorKind({ error: { message } }, 1) === "unavailable";
 }
 
 /**
@@ -52,6 +130,32 @@ export function nextFallback(
       current &&
       candidate.providerID === current.providerID &&
       candidate.id === current.id
+    ) {
+      continue;
+    }
+    return { model: candidate, index: i };
+  }
+  return null;
+}
+
+/**
+ * Same as nextFallback, but also skips keys present in `excluded`. This is the
+ * helper used at runtime so a candidate which rejects switchModel() can be
+ * bypassed without mutating the committed baseline.
+ */
+export function nextAvailableFallback(
+  chain: SwitchbladeModel[],
+  current: SwitchbladeModel | undefined,
+  index: number,
+  excluded: ReadonlySet<string>
+): { model: SwitchbladeModel; index: number } | null {
+  for (let i = index + 1; i < chain.length; i++) {
+    const candidate = chain[i];
+    if (excluded.has(`${candidate.providerID}/${candidate.id}`)) continue;
+    if (
+      current &&
+      current.providerID === candidate.providerID &&
+      current.id === candidate.id
     ) {
       continue;
     }
@@ -89,6 +193,26 @@ export function sanitizeBaseline(value: unknown): SwitchbladeModel[] {
   return value
     .map(toStrictModel)
     .filter((model): model is SwitchbladeModel => model !== null);
+}
+
+/** Return true when options contain an explicit model/fallback chain override. */
+export function hasExplicitFallbackOptions(options: unknown): boolean {
+  if (options == null || typeof options !== "object") return false;
+  const opts = options as SwitchbladeOptions;
+  return (
+    (Array.isArray(opts.fallbacks) && opts.fallbacks.length > 0) ||
+    opts.model != null
+  );
+}
+
+/** Normalize timeoutSwitchAfterAttempt from options; invalid values use the default. */
+export function timeoutSwitchAfterAttempt(options: unknown): number {
+  if (options != null && typeof options === "object") {
+    const raw = (options as SwitchbladeOptions).timeoutSwitchAfterAttempt;
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed >= 1) return Math.floor(parsed);
+  }
+  return 2;
 }
 
 /** Build the fallback chain from options, then the committed baseline, then the default. */

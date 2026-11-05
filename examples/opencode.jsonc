@@ -1,11 +1,19 @@
 {
   "$schema": "https://opencode.ai/config.json",
 
-  // Switchblade: default is the committed src/free-fallbacks.json,
-  // filtered to currently available zero-cost chat models.
-  "plugins": ["opencode-plugin-switchblade"]
+  // Switchblade: committed public baseline, validated at load time and again
+  // before a runtime candidate is selected. Set timeoutSwitchAfterAttempt: 1
+  // to switch immediately on timeouts instead of the default (2).
+  "plugins": [
+    {
+      "package": "opencode-plugin-switchblade",
+      "options": {
+        "timeoutSwitchAfterAttempt": 2
+      }
+    }
+  ]
 
-  // Use a custom ladder instead:
+  // Explicit fallback override (takes precedence over the baseline):
   // "plugins": [
   //   {
   //     "package": "opencode-plugin-switchblade",
@@ -13,7 +21,8 @@
   //       "fallbacks": [
   //         { "providerID": "opencode", "id": "pulse-alpha-free" },
   //         { "providerID": "opencode", "id": "deepseek-v4.1-flash-free" }
-  //       ]
+  //       ],
+  //       "timeoutSwitchAfterAttempt": 2
   //     }
   //   }
   // ]
