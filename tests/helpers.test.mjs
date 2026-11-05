@@ -13,6 +13,8 @@ import {
   buildChain,
   fallbackErrorKind,
   timeoutSwitchAfterAttempt,
+  exhaustedResetMs,
+  autoResumeEnabled,
   sanitizeBaseline,
   DEFAULT_FALLBACK,
 } from "../src/helpers.ts";
@@ -217,4 +219,19 @@ test("nextAvailableFallback: skips excluded candidates", () => {
     nextAvailableFallback(chain, chain[2], 2, new Set(["opencode/a"])),
     null
   );
+});
+
+test("exhaustedResetMs: validates option and defaults to one hour", () => {
+  assert.equal(exhaustedResetMs(undefined), 3_600_000);
+  assert.equal(exhaustedResetMs({ exhaustedResetMs: 86_400_000 }), 86_400_000);
+  assert.equal(exhaustedResetMs({ exhaustedResetMs: "60000" }), 60_000);
+  assert.equal(exhaustedResetMs({ exhaustedResetMs: 0 }), 3_600_000);
+  assert.equal(exhaustedResetMs({ exhaustedResetMs: "invalid" }), 3_600_000);
+});
+
+test("autoResumeEnabled: defaults true, false disables", () => {
+  assert.equal(autoResumeEnabled(undefined), true);
+  assert.equal(autoResumeEnabled({}), true);
+  assert.equal(autoResumeEnabled({ autoResume: true }), true);
+  assert.equal(autoResumeEnabled({ autoResume: false }), false);
 });

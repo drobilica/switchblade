@@ -6,18 +6,18 @@
 // Timeouts are also eligible after the configured attempt.
 //
 // Default ladder: src/free-fallbacks.json, generated from the local model
-// catalog with `npm run update:models` and validated at load time. Runtime
-// switchModel() failures are skipped on the next attempt without mutating the
-// committed baseline.
-//
-// Default ladder: src/free-fallbacks.json, generated from the local model
 // catalog with `npm run update:models` and validated at load time. A session
 // only walks the committed free models, minus any now disabled/unavailable.
+// If the ladder is exhausted, a session may retry again after exhaustedResetMs
+// (default: 1 hour). If the user selects a model after exhaustion, the plugin
+// can inject a synthetic "continue" message (default: enabled).
 //
 // Configuration (object form of `plugins` in opencode.jsonc):
 //   model:     { providerID?, id? }  — single fallback override
 //   fallbacks: [ { providerID?, id? }, ... ] — chained fallback override
 //   timeoutSwitchAfterAttempt: 2      — switch on timeout after N physical attempts
+//   exhaustedResetMs: 3600000        — retry from the top after ladder exhaustion
+//   autoResume: true                  — synthetic "continue" after model selection
 // Explicit options take precedence over the committed baseline.
 
 import { readFileSync } from "node:fs";
@@ -30,12 +30,25 @@ import {
   buildChain,
   sanitizeBaseline,
   timeoutSwitchAfterAttempt,
+  exhaustedResetMs,
+  autoResumeEnabled,
   type SwitchbladeModel,
 } from "./helpers.ts";
 
 const STORAGE_KEY = "sessions";
 
 type SwitchMap = Map<string, number>;
+type ExhaustionMap = Map<string, number>;
+
+type SwitchState = {
+  indices: SwitchMap;
+  exhausted: ExhaustionMap;
+};
+
+const emptyState = (): SwitchState => ({
+  indices: new Map<string, number>(),
+  exhausted: new Map<string, number>(),
+});
 
 /** Read the committed free-model baseline; returns [] when unavailable/invalid. */
 function loadBaseline(): SwitchbladeModel[] {
@@ -93,28 +106,47 @@ async function availableModelKeys(ctx: any): Promise<Set<string> | null> {
   }
 }
 
-async function loadPersisted(ctx: any): Promise<SwitchMap> {
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value != null && typeof value === "object" && !Array.isArray(value);
+
+const finiteNumberMap = (value: unknown): SwitchMap => {
   const map: SwitchMap = new Map();
+  if (!isRecord(value)) return map;
+  for (const [key, v] of Object.entries(value)) {
+    if (typeof v === "number" && Number.isFinite(v)) map.set(key, v);
+  }
+  return map;
+};
+
+async function loadPersisted(ctx: any): Promise<SwitchState> {
+  const state = emptyState();
   try {
     const raw = await ctx.storage?.get?.(STORAGE_KEY);
-    const obj =
-      typeof raw === "string"
-        ? JSON.parse(raw)
-        : (raw as Record<string, number>);
-    if (obj && typeof obj === "object") {
-      for (const [k, v] of Object.entries(obj)) {
-        if (typeof v === "number" && Number.isFinite(v)) map.set(k, v);
-      }
+    const parsed =
+      typeof raw === "string" ? JSON.parse(raw) : (raw as unknown);
+    if (!isRecord(parsed)) return state;
+
+    // New format: { sessions: {...}, exhausted: {...} }.
+    if (isRecord(parsed.sessions) || isRecord(parsed.exhausted)) {
+      state.indices = finiteNumberMap(parsed.sessions);
+      state.exhausted = finiteNumberMap(parsed.exhausted);
+      return state;
     }
+
+    // Backward compatibility: the old format was a flat session->index map.
+    state.indices = finiteNumberMap(parsed);
   } catch {
     // Corrupt / unreadable storage: start fresh, don't crash the plugin.
   }
-  return map;
+  return state;
 }
 
-async function persist(ctx: any, map: SwitchMap): Promise<void> {
+async function persist(ctx: any, state: SwitchState): Promise<void> {
   try {
-    await ctx.storage?.set?.(STORAGE_KEY, Object.fromEntries(map));
+    await ctx.storage?.set?.(STORAGE_KEY, {
+      sessions: Object.fromEntries(state.indices),
+      exhausted: Object.fromEntries(state.exhausted),
+    });
   } catch {
     // Best-effort only; in-memory state is the fallback.
   }
@@ -127,6 +159,8 @@ export default Plugin.define({
     const options = (ctx as any).options;
     const explicitChain = hasExplicitFallbackOptions(options);
     const timeoutAfter = timeoutSwitchAfterAttempt(options);
+    const resetAfterMs = exhaustedResetMs(options);
+    const autoResume = autoResumeEnabled(options);
 
     const committed = loadBaseline();
     const available = await availableModelKeys(ctx);
@@ -155,13 +189,36 @@ export default Plugin.define({
     // skipped by future attempts without rewriting the committed baseline.
     const unavailableKeys = new Set<string>();
 
-    // Per-session switched index: -1 = never switched, >= 0 = index into chain.
-    const switched: SwitchMap = await loadPersisted(ctx);
+    // Automatic selections are tracked (with a short TTL) so the model.selected
+    // subscriber does not inject a synthetic resume for this plugin's own
+    // switchModel() calls.
+    const expectedSelections = new Map<string, number>();
+    const pruneExpectedSelections = (): void => {
+      const now = Date.now();
+      for (const [key, created] of expectedSelections) {
+        if (now - created > 30_000) expectedSelections.delete(key);
+      }
+    };
+
+    // Per-session fallback position and exhaustion timestamps.
+    const state: SwitchState = await loadPersisted(ctx);
+
+    // Clamp indices persisted by an older/larger baseline.
+    for (const [sessionID, index] of state.indices) {
+      if (!Number.isInteger(index) || index < 0 || index >= chain.length) {
+        state.indices.delete(sessionID);
+      }
+    }
 
     console.log(
-      `[switchblade] loaded, fallback chain: ${chain
-        .map((m) => `${m.providerID}/${m.id}`)
-        .join(" -> ")}`
+      `[switchblade] loaded, fallback chain: ${
+        chain.length
+          ? chain.map((m) => `${m.providerID}/${m.id}`).join(" -> ")
+          : "<disabled>"
+      }`
+    );
+    console.log(
+      `[switchblade] exhausted reset: ${resetAfterMs}ms; autoResume: ${autoResume}`
     );
 
     // Retry hook: switch to the next usable fallback when OpenCode reports a
@@ -171,34 +228,58 @@ export default Plugin.define({
       if (!kind || chain.length === 0) return;
 
       const sessionID: string = event.sessionID;
-      const index = switched.get(sessionID) ?? -1;
+      const now = Date.now();
       const blocked = new Set(unavailableKeys);
 
-      let candidate = nextAvailableFallback(chain, event.model, index, blocked);
+      let effectiveIndex = state.indices.get(sessionID) ?? -1;
+      const exhaustedAt = state.exhausted.get(sessionID);
+      if (exhaustedAt) {
+        if (now - exhaustedAt >= resetAfterMs) {
+          state.indices.delete(sessionID);
+          effectiveIndex = -1;
+          console.log(
+            `[switchblade] session ${sessionID}: ${resetAfterMs}ms elapsed; retrying ladder from the top`
+          );
+        } else {
+          const remainingMs = resetAfterMs - (now - exhaustedAt);
+          console.log(
+            `[switchblade] session ${sessionID}: ladder exhausted; earliest retry from the top in ${Math.ceil(remainingMs / 60000)} minute(s)`
+          );
+          return;
+        }
+      }
+
+      let candidate = nextAvailableFallback(chain, event.model, effectiveIndex, blocked);
       while (candidate) {
+        const expectKey = `${sessionID}:${modelKey(candidate.model)}`;
+        expectedSelections.set(expectKey, Date.now());
+        pruneExpectedSelections();
         try {
           await ctx.session.switchModel({
             sessionID,
             model: candidate.model,
           });
         } catch (err) {
+          expectedSelections.delete(expectKey);
           const key = modelKey(candidate.model);
           blocked.add(key);
           if (isUnavailableSwitchFailure(err)) unavailableKeys.add(key);
           console.warn(
             `[switchblade] session ${sessionID}: fallback candidate ${key} rejected (${isUnavailableSwitchFailure(err) ? "unavailable" : "unknown failure"}); trying next candidate`
           );
+          effectiveIndex = candidate.index;
           candidate = nextAvailableFallback(
             chain,
             event.model,
-            candidate.index,
+            effectiveIndex,
             blocked
           );
           continue;
         }
 
-        switched.set(sessionID, candidate.index);
-        await persist(ctx, switched);
+        state.indices.set(sessionID, candidate.index);
+        state.exhausted.delete(sessionID);
+        await persist(ctx, state);
         console.log(
           `[switchblade] session ${sessionID}: ${kind} failure, switched to ${modelKey(candidate.model)} (attempt ${event.attempt}), retrying immediately`
         );
@@ -206,26 +287,116 @@ export default Plugin.define({
         return;
       }
 
+      state.exhausted.set(sessionID, now);
+      await persist(ctx, state);
       console.warn(
-        `[switchblade] session ${sessionID}: no switchable fallback remains for ${kind} failure; leaving retry to OpenCode`
+        `[switchblade] session ${sessionID}: no switchable fallback remains for ${kind} failure; earliest retry from the top in ${Math.ceil(resetAfterMs / 60000)} minute(s)`
       );
     });
 
-    // Context hook: remind the agent (and user) when this session switched.
+    // Context hook: remind the agent when this session switched or is exhausted.
     const contextReg = await ctx.session.hook("context", (event: any) => {
-      const index = switched.get(event.sessionID);
-      if (index == null || index < 0) return;
-      const current = chain[index];
-      if (!current) return;
+      const index = state.indices.get(event.sessionID);
+      const current = index != null && index >= 0 ? chain[index] : undefined;
+      if (current) {
+        event.system.push({
+          type: "text",
+          text: `[switchblade] This session was moved to ${current.providerID}/${current.id} after the previous model hit an availability, capacity, quota, or timeout limit. Continue your work normally; do not mention this note to the user.`,
+        });
+        return;
+      }
 
-      event.system.push({
-        type: "text",
-        text: `[switchblade] This session was moved to ${current.providerID}/${current.id} after the previous model hit an availability, capacity, quota, or timeout limit. Continue your work normally; do not mention this note to the user.`,
-      });
+      if (state.exhausted.has(event.sessionID)) {
+        event.system.push({
+          type: "text",
+          text: "[switchblade] All configured fallback models failed or were unavailable. Continue with the current request if possible; otherwise explain that a model selection or retry is required. Do not mention this note to the user.",
+        });
+      }
     });
 
-    // Cleanup: dispose hook registrations on plugin teardown.
+    // Resume an exhausted session only when a model is explicitly selected.
+    // Automatic switchModel() calls are tracked in expectedSelections and do
+    // not inject a second synthetic resume.
+    const modelSelectedAbort = new AbortController();
+    const eventModelKey = (model: any): string | null =>
+      model && typeof model.providerID === "string" && typeof model.id === "string"
+        ? `${model.providerID}/${model.id}`
+        : null;
+
+    if (ctx.event?.subscribe) {
+      void (async () => {
+        try {
+          for await (const event of ctx.event.subscribe({
+            types: ["session.model.selected"],
+            signal: modelSelectedAbort.signal,
+          })) {
+            const selectedEvent = event as any;
+            if (selectedEvent?.type !== "session.model.selected") continue;
+
+            const sessionID = selectedEvent.sessionID;
+            const selectedKey = eventModelKey(selectedEvent.model);
+            if (!sessionID || !selectedKey) continue;
+
+            const expectKey = `${sessionID}:${selectedKey}`;
+            if (expectedSelections.delete(expectKey)) continue;
+            if (!state.exhausted.has(sessionID)) continue;
+
+            const selectedIndex = chain.findIndex(
+              (model) => modelKey(model) === selectedKey
+            );
+            if (selectedIndex >= 0) state.indices.set(sessionID, selectedIndex);
+            else state.indices.delete(sessionID);
+            state.exhausted.delete(sessionID);
+
+            if (!autoResume) {
+              await persist(ctx, state);
+              console.log(
+                `[switchblade] session ${sessionID}: model selection cleared exhausted ladder state`
+              );
+              continue;
+            }
+
+            try {
+              await ctx.session.synthetic({
+                sessionID,
+                text: "Continue from where you stopped.",
+                description: "Switchblade resume",
+                delivery: "queue",
+                resume: true,
+                metadata: {
+                  source: "switchblade",
+                  reason: "model-selected-after-exhaustion",
+                },
+              });
+              await persist(ctx, state);
+              console.log(
+                `[switchblade] session ${sessionID}: queued synthetic continue after model selection`
+              );
+            } catch (err) {
+              state.exhausted.set(sessionID, Date.now());
+              await persist(ctx, state);
+              console.warn(
+                `[switchblade] session ${sessionID}: synthetic resume failed: ${
+                  (err as Error)?.message ?? err
+                }`
+              );
+            }
+          }
+        } catch (err) {
+          if (!modelSelectedAbort.signal.aborted) {
+            console.warn(
+              `[switchblade] model.selected subscription stopped: ${
+                (err as Error)?.message ?? err
+              }`
+            );
+          }
+        }
+      })();
+    }
+
+    // Cleanup: dispose hook registrations and the event subscription.
     return () => {
+      modelSelectedAbort.abort();
       void retryReg.dispose().catch(() => {});
       void contextReg.dispose().catch(() => {});
       console.log("[switchblade] unloaded");

@@ -8,7 +8,9 @@
     {
       "package": "opencode-plugin-switchblade",
       "options": {
-        "timeoutSwitchAfterAttempt": 2
+        "timeoutSwitchAfterAttempt": 2,
+        "exhaustedResetMs": 3600000,
+        "autoResume": true
       }
     }
   ]

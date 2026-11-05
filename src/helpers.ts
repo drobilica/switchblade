@@ -11,6 +11,10 @@ export type SwitchbladeOptions = {
   fallbacks?: SwitchbladeModel[];
   /** Switch to the next fallback after this many physical attempts on a timeout. Defaults to 2. */
   timeoutSwitchAfterAttempt?: number;
+  /** Milliseconds before an exhausted session may retry from the top. Defaults to 1 hour. */
+  exhaustedResetMs?: number;
+  /** Inject a synthetic "continue" after a model is selected following exhaustion. Defaults to true. */
+  autoResume?: boolean;
 };
 
 
@@ -213,6 +217,22 @@ export function timeoutSwitchAfterAttempt(options: unknown): number {
     if (Number.isFinite(parsed) && parsed >= 1) return Math.floor(parsed);
   }
   return 2;
+}
+
+/** Normalize exhaustedResetMs from options; invalid values use the default (1 hour). */
+export function exhaustedResetMs(options: unknown): number {
+  if (options != null && typeof options === "object") {
+    const raw = (options as SwitchbladeOptions).exhaustedResetMs;
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed >= 60_000) return Math.floor(parsed);
+  }
+  return 3_600_000;
+}
+
+/** Return true unless autoResume is explicitly set to false. */
+export function autoResumeEnabled(options: unknown): boolean {
+  if (options == null || typeof options !== "object") return true;
+  return (options as SwitchbladeOptions).autoResume !== false;
 }
 
 /** Build the fallback chain from options, then the committed baseline, then the default. */

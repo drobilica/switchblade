@@ -21,7 +21,14 @@ and retries immediately.
    `event.decision = { retry: true, delay: 0 }` on success.
 4. If a candidate is rejected by `switchModel()`, it is skipped; other candidates
    are tried without mutating `src/free-fallbacks.json`.
-5. On later turns, a short system note is added via the `context` hook.
+5. If every candidate fails, the session is marked exhausted. After
+   `exhaustedResetMs` (default: 1 hour), the next qualifying failure retries
+   the ladder from the top instead of permanently stopping.
+6. If the user selects a model after exhaustion, Switchblade clears the
+   exhausted state and (unless `autoResume: false`) queues a synthetic
+   `Continue from where you stopped.` instruction so the work can resume.
+   Automatic plugin switches do **not** trigger this synthetic resume.
+7. On later turns, a short system note is added via the `context` hook.
 
 The default ladder is committed at `src/free-fallbacks.json`. At plugin startup
 Switchblade:
@@ -72,6 +79,8 @@ Object form with a custom chain or timeout threshold:
       "package": "opencode-plugin-switchblade",
       "options": {
         "timeoutSwitchAfterAttempt": 2,
+        "exhaustedResetMs": 3600000,
+        "autoResume": true,
         "fallbacks": [
           { "providerID": "opencode", "id": "pulse-alpha-free" },
           { "providerID": "opencode", "id": "deepseek-v4.1-flash-free" }
@@ -89,6 +98,8 @@ Object form with a custom chain or timeout threshold:
 | `fallbacks`               | `[{ providerID?, id? }, ...]`     | committed `src/free-fallbacks.json`      | Chained fallbacks; takes precedence. |
 | `model`                   | `{ providerID?, id? }`            | `opencode/crouton-alpha-free`            | Single fallback override. |
 | `timeoutSwitchAfterAttempt` | `number`                        | `2`                                      | Minimum physical attempt before switching on timeout/reset. |
+| `exhaustedResetMs`        | `number`                          | `3600000` (1h)                           | Minimum wait before a stopped ladder retries from the top. Values below 60,000 are ignored. |
+| `autoResume`              | `boolean`                         | `true`                                   | Queue synthetic `Continue from where you stopped.` after a model is selected following exhaustion. |
 
 - Omit `providerID` to default to `"opencode"`; omit `id` to default to
   `"crouton-alpha-free"`.
@@ -137,6 +148,30 @@ to the JSON; tests reject common credential fields.
 support, availability, recency, and context. Add a manual trust tier to the
 updater if you want stronger ordering.
 
+## Automatic resume after exhaustion
+
+Manual model selection matters. When every ladder candidate fails, Switchblade
+stores an `exhausted` timestamp. On the next qualifying failure before the
+cooldown expires, it leaves OpenCode retry alone. After the cooldown, it resets
+the session ladder position and retries from the top.
+
+When OpenCode emits `session.model.selected` while the session is marked
+exhausted—typically because you selected a different model in `/models`—Switchblade:
+
+1. clears the exhausted marker,
+2. points the fallback position at the selected model if it is in the ladder,
+   otherwise resets it for the next failure,
+3. unless `autoResume` is `false`, queues a hidden synthetic message such as
+   `Continue from where you stopped.` with `resume: true`, so the session can
+   pick up without you typing “continue”.
+
+Switchblade does not auto-inject on its own automatic `switchModel()` calls;
+the plugin’s automatic selections are recognized and ignored by this flow.
+
+`experimental.idle` does **not** run after an execution failure in current
+OpenCode, so the model-selection path is the reliable hook for resuming a
+stopped session.
+
 ## Provider timeouts
 
 OpenCode itself controls transport timeouts. From Providers:
@@ -175,6 +210,12 @@ disabled instead of selecting a hidden model.
 
 - **Free fallback still needs free quota.** Availability and quota are not the
   same thing; a model can be listed but become temporarily over capacity.
+- **Exhaustion is a cooldown, not a permanent stop.** After `exhaustedResetMs`,
+  the next matching failure retries the ladder from the top. Set it to `86400000`
+  for a 24-hour cooldown.
+- **Manual model selection can resume.** With `autoResume: true` (default),
+  selecting a model after exhaustion queues a hidden `Continue` instruction.
+  Set `autoResume: false` if you prefer to type continue yourself.
 - **Switch is session-wide.** `switchModel` changes the model for the whole
   session.
 - **One switch per failure step.** Each new failure advances one model.
